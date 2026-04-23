@@ -1,0 +1,26 @@
+# Gradle
+.gradle/
+build/
+**/build/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# Android Studio
+*.iml
+.idea/
+local.properties
+*.hprof
+.cxx/
+*.keystore
+!debug.keystore
+
+# Generated
+gen/
+out/
+release/
+captures/
+
+# OS
+.DS_Store
+Thumbs.db
