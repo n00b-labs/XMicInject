@@ -182,9 +182,15 @@ class XMicHook : IXposedHookLoadPackage {
     // runCatching guards against reflection failures in unusual system configurations.
     // Falls back to 16 kHz so inject still works even if sampleRate can't be read.
     private fun sampleRate(record: AudioRecord): Int {
-        return runCatching { record.sampleRate }
-            .getOrDefault(PcmRingBuffer.SAMPLE_RATE_HZ)
-            .takeIf { it > 0 } ?: PcmRingBuffer.SAMPLE_RATE_HZ
+        val raw = runCatching { record.sampleRate }.getOrElse {
+            Log.w(TAG, "sampleRate() threw: ${it.message} — falling back to ${PcmRingBuffer.SAMPLE_RATE_HZ}")
+            -1
+        }
+        val resolved = raw.takeIf { it > 0 } ?: PcmRingBuffer.SAMPLE_RATE_HZ
+        if (raw != resolved) {
+            Log.w(TAG, "sampleRate fallback: raw=$raw resolved=$resolved")
+        }
+        return resolved
     }
 
     private fun channelCount(record: AudioRecord): Int {

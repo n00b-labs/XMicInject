@@ -15,12 +15,12 @@ internal object UplinkSender {
     // Switch to a different stream if the current one has been silent for this long.
     private const val STREAM_STALE_MS = 1200L
 
+    private const val NONE = Long.MIN_VALUE
+
     private val lock = Any()
     private var activeStreamId: Long = NONE
     private var activeStreamLastMs: Long = 0L
     private var loggedFirstSend = false
-
-    private const val NONE = Long.MIN_VALUE
 
     // Called from each hooked AudioRecord.read(). buf is already filled with real mic data.
     fun send(buf: ByteArray, offset: Int, count: Int, sampleRateHz: Int, channelCount: Int, streamId: Long) {
