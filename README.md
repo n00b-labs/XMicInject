@@ -1,8 +1,8 @@
 # XMicInject
 
-LSPosed module that replaces microphone input system-wide with audio from a provider app.
+LSPosed module that intercepts `AudioRecord.read()` system-wide and replaces microphone audio with PCM received from a provider app over TCP.
 
-Any VoIP app (Telegram, Discord, system dialer) reads its `AudioRecord` and receives whatever audio the provider sends over a Unix socket — instead of the real microphone.
+Designed for a speech-to-speech translation pipeline: the user speaks, the real mic audio is forwarded to the provider, the provider returns translated audio, and that audio is injected back so VoIP apps (Telegram, Discord, etc.) hear the translation instead of the original voice.
 
 ## Requirements
 
@@ -13,16 +13,16 @@ Any VoIP app (Telegram, Discord, system dialer) reads its `AudioRecord` and rece
 ## How it works
 
 ```
-Provider app (e.g. Voimacher)
-  └─ MicIpcServer — LocalServerSocket("voimacher_mic")
-       └─ writes translated PCM (16 kHz, mono, PCM16)
-
-XMicInject (this module)
-  └─ SocketClient — connects to "voimacher_mic"
-       └─ PcmRingBuffer — 4-second ring buffer
-            └─ XMicHook — AudioRecord.read() hook
-                 └─ overwrites buffer in any VoIP app
+User speaks
+  → AudioRecord.read() fires in VoIP app
+    → XMicHook captures real mic audio → UplinkSender → IpcClient → [TCP] → the Provider
+    → XMicHook overwrites buf with translated audio ← PcmRingBuffer ← IpcClient ← [TCP] ← the Provider
+      → VoIP app hears the translation
 ```
+
+The TCP connection is bidirectional over a single socket:
+- **Inject stream** (the Provider → module): translated PCM written into `PcmRingBuffer`
+- **Uplink stream** (module → the Provider): real mic audio forwarded so the Provider can send it to the S2S server
 
 ## Installation
 
@@ -38,9 +38,7 @@ XMicInject (this module)
 
 ## Usage
 
-Start a provider app that streams PCM to the abstract Unix socket `voimacher_mic`. Once connected, any app using `AudioRecord` will receive the injected audio.
-
-Reference provider: [Voimacher](https://github.com/your-org/voimacher)
+Start the Provider app. Once it listens on `127.0.0.1:38673`, XMicInject connects automatically and injection begins. Any app using `AudioRecord` will receive translated audio; the real mic is muted while connected.
 
 ## Protocol
 
@@ -50,7 +48,9 @@ See [SPEC.md](SPEC.md) for the full IPC protocol and audio format spec.
 
 ```
 app/src/main/java/com/xmicinject/
-├── XMicHook.kt       — IXposedHookLoadPackage, hooks AudioRecord.read()
-├── PcmRingBuffer.kt  — thread-safe ring buffer (128 000 bytes / 4 sec)
-└── SocketClient.kt   — daemon thread, reads PCM from Unix socket
+├── XMicHook.kt        — entry point, registers AudioRecord.read() hooks
+├── PcmRingBuffer.kt   — thread-safe ring buffer (stores inject audio at 16 kHz)
+├── IpcClient.kt       — TCP connection to the Provider, feeds buffer, sends uplink
+├── UplinkSender.kt    — captures real mic, converts to mono, resamples, sends
+└── AudioResampler.kt  — PCM16 linear interpolation resampler (pure functions)
 ```

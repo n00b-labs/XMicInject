@@ -1,23 +1,37 @@
 package com.xmicinject
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
+// Ring buffer that holds injected PCM audio from the provider.
+// Stores audio at SAMPLE_RATE_HZ. Resampling happens in the caller.
 internal object PcmRingBuffer {
 
-    // 4 seconds of 16 kHz mono PCM16 = 128 000 bytes
-    private const val CAPACITY = 16_000 * 2 * 4
+    private const val TAG = "XMicBuffer"
+
+    const val SAMPLE_RATE_HZ: Int = 16_000
+    private const val CAPACITY = SAMPLE_RATE_HZ * 2 * 4  // 4 seconds, mono, PCM16
+
     private val data = ByteArray(CAPACITY)
     private var writePos = 0
     private var available = 0
     private val lock = Any()
+    private var lastOverflowLogMs = 0L
 
     val active: AtomicBoolean = AtomicBoolean(false)
 
     fun write(src: ByteArray, offset: Int, length: Int) {
         synchronized(lock) {
-            active.set(true)
+            if (!active.getAndSet(true)) {
+                Log.i(TAG, "Buffer activated — inject stream flowing")
+            }
+            if (available == CAPACITY) {
+                val now = System.currentTimeMillis()
+                if (now - lastOverflowLogMs > 5_000) {
+                    Log.w(TAG, "Buffer full — overwriting unread data (provider faster than app reads)")
+                    lastOverflowLogMs = now
+                }
+            }
             var remaining = length
             var srcPos = offset
             while (remaining > 0) {
@@ -31,6 +45,7 @@ internal object PcmRingBuffer {
         }
     }
 
+    // Returns false if inactive or not enough data (caller should pass through real mic).
     fun readBytes(dst: ByteArray, dstOffset: Int, count: Int): Boolean {
         if (!active.get()) return false
         synchronized(lock) {
@@ -53,8 +68,8 @@ internal object PcmRingBuffer {
     fun readShorts(dst: ShortArray, dstOffset: Int, count: Int): Boolean {
         val bytes = ByteArray(count * 2)
         if (!readBytes(bytes, 0, bytes.size)) return false
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until count) dst[dstOffset + i] = bb.getShort()
+        val shorts = AudioResampler.bytesToShorts(bytes, 0, count)
+        System.arraycopy(shorts, 0, dst, dstOffset, count)
         return true
     }
 
@@ -63,5 +78,6 @@ internal object PcmRingBuffer {
             available = 0
             active.set(false)
         }
+        Log.i(TAG, "Buffer cleared — passthrough mode")
     }
 }

@@ -1,9 +1,8 @@
-# Gradle
-.gradle/
+# Gradle caches (gradle/wrapper/ is tracked and must not be ignored)
+.gradle*/
 build/
 **/build/
 gradle-app.setting
-!gradle-wrapper.jar
 .gradletasknamecache
 
 # Android Studio
@@ -14,6 +13,7 @@ local.properties
 .cxx/
 *.keystore
 !debug.keystore
+.android
 
 # Generated
 gen/
