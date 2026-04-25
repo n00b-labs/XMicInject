@@ -1,79 +1,159 @@
 package com.xmicinject
 
+import android.media.MediaRecorder
 import android.util.Log
 import kotlin.math.sqrt
 
-// Captures real mic audio from hooked AudioRecord calls and sends it to the provider.
-// Handles multi-channel → mono conversion, sample rate conversion, and stream selection.
+// Captures real mic audio from hooked AudioRecord calls and writes it to a WAV file.
+// Handles multi-channel to mono conversion, sample rate conversion, and stream selection.
 internal object UplinkSender {
 
-    private const val TAG = "XMicUplink"
+    private const val TAG: String = "XMicUplink"
+    internal const val OUTPUT_SAMPLE_RATE_HZ: Int = 16_000
 
     // Ignore near-silence chunks when selecting which AudioRecord stream to follow.
-    private const val MIN_RMS = 0.006f
+    private const val MIN_RMS: Float = 0.006f
 
     // Switch to a different stream if the current one has been silent for this long.
-    private const val STREAM_STALE_MS = 1200L
+    private const val STREAM_STALE_MS: Long = 1200L
 
-    private const val NONE = Long.MIN_VALUE
+    private const val NONE: Long = Long.MIN_VALUE
 
-    private val lock = Any()
+    private val lock: Any = Any()
+    private val ignoredStreams: MutableSet<Long> = HashSet()
+    private val observedStreams: MutableSet<Long> = HashSet()
     private var activeStreamId: Long = NONE
+    private var activeStreamSource: Int = -1
     private var activeStreamLastMs: Long = 0L
-    private var loggedFirstSend = false
+    private var loggedFirstSend: Boolean = false
+    private var lastActiveStreamLogMs: Long = 0L
+
+    fun configureCaptureOutput(dataDir: String?) {
+        CaptureFileWriter.configure(dataDir)
+    }
 
     // Called from each hooked AudioRecord.read(). buf is already filled with real mic data.
-    fun send(buf: ByteArray, offset: Int, count: Int, sampleRateHz: Int, channelCount: Int, streamId: Long) {
-        val mono = toMono(buf, offset, count, channelCount)
+    fun send(
+        buf: ByteArray,
+        offset: Int,
+        count: Int,
+        sampleRateHz: Int,
+        channelCount: Int,
+        streamId: Long,
+        packageName: String,
+        audioSource: Int
+    ) {
+        val mono: ByteArray = toMono(buf, offset, count, channelCount)
         if (mono.isEmpty()) return
-        if (!selectStream(streamId, mono)) return
 
-        val payload = if (sampleRateHz == PcmRingBuffer.SAMPLE_RATE_HZ) {
-            mono
-        } else {
-            AudioResampler.resampleBytes(mono, 0, mono.size, sampleRateHz, PcmRingBuffer.SAMPLE_RATE_HZ)
-        }
+        val chunkRms: Float = rms(mono)
+        logObservedStream(
+            packageName = packageName,
+            streamId = streamId,
+            audioSource = audioSource,
+            sampleRateHz = sampleRateHz,
+            channelCount = channelCount,
+            chunkBytes = count,
+            chunkRms = chunkRms
+        )
+        if (!selectStream(
+                streamId = streamId,
+                packageName = packageName,
+                audioSource = audioSource,
+                sampleRateHz = sampleRateHz,
+                channelCount = channelCount,
+                chunkRms = chunkRms
+            )
+        ) return
+
+        val payload: ByteArray = AudioResampler.resampleBytes(mono, 0, mono.size, sampleRateHz, OUTPUT_SAMPLE_RATE_HZ)
         if (payload.isEmpty()) return
-        IpcClient.write(payload)
+
+        CaptureFileWriter.appendPcm16Mono(payload)
         if (!loggedFirstSend) {
             loggedFirstSend = true
-            Log.i(TAG, "Uplink flowing: sending mic to provider (srcRate=${sampleRateHz}Hz)")
+            Log.i(
+                TAG,
+                "Capture flowing: pkg=$packageName streamId=$streamId " +
+                    "source=${audioSourceName(audioSource)} srcRate=${sampleRateHz}Hz " +
+                    "ch=$channelCount dstRate=${OUTPUT_SAMPLE_RATE_HZ}Hz"
+            )
+        }
+
+        val nowMs: Long = System.currentTimeMillis()
+        if ((nowMs - lastActiveStreamLogMs) >= 2_000L) {
+            lastActiveStreamLogMs = nowMs
+            Log.d(
+                TAG,
+                "Capture active: pkg=$packageName streamId=$streamId " +
+                    "source=${audioSourceName(audioSource)} rms=$chunkRms bytes=$count"
+            )
         }
     }
 
-    // Called by IpcClient on disconnect so the next connection starts fresh.
+    fun logIgnoredSource(
+        packageName: String,
+        streamId: Long,
+        audioSource: Int,
+        sampleRateHz: Int,
+        channelCount: Int
+    ) {
+        if (streamId == NONE) return
+        synchronized(lock) {
+            if (!ignoredStreams.add(streamId)) return
+        }
+        Log.i(
+            TAG,
+            "Ignoring source: pkg=$packageName streamId=$streamId " +
+                "source=${audioSourceName(audioSource)} sampleRate=${sampleRateHz}Hz ch=$channelCount"
+        )
+    }
+
     fun reset() {
         synchronized(lock) {
             activeStreamId = NONE
+            activeStreamSource = -1
             activeStreamLastMs = 0L
             loggedFirstSend = false
+            lastActiveStreamLogMs = 0L
+            observedStreams.clear()
+            ignoredStreams.clear()
         }
+        CaptureFileWriter.reset()
     }
 
-    // Picks one AudioRecord stream to follow and ignores all others.
-    //
-    // Problem: the hook runs in every app simultaneously. Multiple apps may have an open
-    // AudioRecord at the same time (e.g. Telegram + a background recorder). We must send
-    // only one mic stream to the provider — mixing them would produce garbage.
-    //
-    // Solution: lock onto the first stream whose RMS exceeds MIN_RMS (i.e. the user is
-    // actually speaking). Stay locked until that stream goes silent for STREAM_STALE_MS,
-    // then switch to whichever stream next has signal.
-    private fun selectStream(streamId: Long, payload: ByteArray): Boolean {
+    // Telegram may open multiple AudioRecord instances at once. We dump only one active
+    // stream to the file; mixing several instances would make the capture unusable.
+    private fun selectStream(
+        streamId: Long,
+        packageName: String,
+        audioSource: Int,
+        sampleRateHz: Int,
+        channelCount: Int,
+        chunkRms: Float
+    ): Boolean {
         if (streamId == NONE) return false
-        val chunkRms = rms(payload)
-        val nowMs = System.currentTimeMillis()
+        val nowMs: Long = System.currentTimeMillis()
         synchronized(lock) {
-            val noActive = activeStreamId == NONE
-            val stale = !noActive && (nowMs - activeStreamLastMs) >= STREAM_STALE_MS
-            val isActive = streamId == activeStreamId
+            val noActive: Boolean = activeStreamId == NONE
+            val stale: Boolean = !noActive && (nowMs - activeStreamLastMs) >= STREAM_STALE_MS
+            val isActive: Boolean = streamId == activeStreamId
+            val candidatePriority: Int = sourcePriority(audioSource)
+            val activePriority: Int = sourcePriority(activeStreamSource)
+            val betterSource: Boolean = !isActive && candidatePriority > activePriority && chunkRms >= MIN_RMS
 
             if (noActive && chunkRms < MIN_RMS) return false
 
-            if (noActive || (stale && chunkRms >= MIN_RMS)) {
+            if (noActive || betterSource || (stale && chunkRms >= MIN_RMS)) {
                 if (activeStreamId != streamId) {
-                    Log.i(TAG, "Stream selected: id=$streamId rms=$chunkRms")
+                    Log.i(
+                        TAG,
+                        "Stream selected: pkg=$packageName streamId=$streamId " +
+                            "source=${audioSourceName(audioSource)} rms=$chunkRms " +
+                            "sampleRate=${sampleRateHz}Hz ch=$channelCount"
+                    )
                     activeStreamId = streamId
+                    activeStreamSource = audioSource
                 }
                 if (chunkRms >= MIN_RMS) activeStreamLastMs = nowMs
                 return true
@@ -87,14 +167,55 @@ internal object UplinkSender {
         }
     }
 
-    // Averages all channels into mono PCM16 LE.
+    private fun logObservedStream(
+        packageName: String,
+        streamId: Long,
+        audioSource: Int,
+        sampleRateHz: Int,
+        channelCount: Int,
+        chunkBytes: Int,
+        chunkRms: Float
+    ) {
+        if (streamId == NONE) return
+        synchronized(lock) {
+            if (!observedStreams.add(streamId)) return
+        }
+        Log.i(
+            TAG,
+            "Observed stream: pkg=$packageName streamId=$streamId " +
+                "source=${audioSourceName(audioSource)} sampleRate=${sampleRateHz}Hz " +
+                "ch=$channelCount bytes=$chunkBytes rms=$chunkRms"
+        )
+    }
+
+    private fun audioSourceName(audioSource: Int): String {
+        return when (audioSource) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+            MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
+            else -> "UNKNOWN($audioSource)"
+        }
+    }
+
+    private fun sourcePriority(audioSource: Int): Int {
+        return when (audioSource) {
+            MediaRecorder.AudioSource.UNPROCESSED -> 4
+            MediaRecorder.AudioSource.MIC -> 3
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> 2
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION -> 1
+            else -> 0
+        }
+    }
+
     private fun toMono(src: ByteArray, offset: Int, length: Int, channelCount: Int): ByteArray {
         if (length < 2) return ByteArray(0)
-        val channels = channelCount.coerceAtLeast(1)
+        val channels: Int = channelCount.coerceAtLeast(1)
         if (channels == 1) return src.copyOfRange(offset, offset + length)
 
-        val bytesPerFrame = channels * 2
-        val frameCount = length / bytesPerFrame
+        val bytesPerFrame: Int = channels * 2
+        val frameCount: Int = length / bytesPerFrame
         if (frameCount <= 0) return ByteArray(0)
 
         val out = ByteArray(frameCount * 2)
@@ -103,12 +224,12 @@ internal object UplinkSender {
         repeat(frameCount) {
             var sum = 0
             repeat(channels) {
-                val low = src[srcIndex].toInt() and 0xFF
-                val high = src[srcIndex + 1].toInt()
+                val low: Int = src[srcIndex].toInt() and 0xFF
+                val high: Int = src[srcIndex + 1].toInt()
                 sum += (high shl 8) or low
                 srcIndex += 2
             }
-            val mono = (sum / channels).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            val mono: Int = (sum / channels).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
             out[outIndex] = (mono and 0xFF).toByte()
             out[outIndex + 1] = ((mono ushr 8) and 0xFF).toByte()
             outIndex += 2
@@ -116,20 +237,18 @@ internal object UplinkSender {
         return out
     }
 
-    // RMS (Root Mean Square) — measures the energy/loudness of an audio chunk.
-    // Returns a value from 0.0 (silence) to 1.0 (maximum loudness).
-    // Formula: sqrt( mean( (sample / MAX_VALUE)² ) )
-    // Used to tell apart speech from silence when selecting the active stream.
+    // RMS (Root Mean Square) measures the energy of an audio chunk.
     private fun rms(payload: ByteArray): Float {
-        val sampleCount = payload.size / 2
+        val sampleCount: Int = payload.size / 2
         if (sampleCount <= 0) return 0f
+
         var sumSquares = 0.0
         var i = 0
         repeat(sampleCount) {
-            val low = payload[i].toInt() and 0xFF
-            val high = payload[i + 1].toInt()
-            val sample = (high shl 8) or low
-            val normalized = sample.toDouble() / Short.MAX_VALUE
+            val low: Int = payload[i].toInt() and 0xFF
+            val high: Int = payload[i + 1].toInt()
+            val sample: Int = (high shl 8) or low
+            val normalized: Double = sample.toDouble() / Short.MAX_VALUE
             sumSquares += normalized * normalized
             i += 2
         }

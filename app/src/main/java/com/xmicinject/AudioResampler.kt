@@ -1,44 +1,19 @@
 package com.xmicinject
 
-import kotlin.math.ceil
 import kotlin.math.floor
 
 // Linear interpolation resampler for PCM16 mono audio.
 // All functions are pure (no state) and safe to call from any thread.
 internal object AudioResampler {
 
-    // How many source bytes must be read from the ring buffer to produce `outputBytes`
-    // bytes at `targetHz`, given that the buffer stores audio at `sourceHz`.
-    // Uses ceil so we never under-read — better to have one extra sample than one too few.
-    fun sourceBytesNeeded(outputBytes: Int, targetHz: Int, sourceHz: Int): Int {
-        val outputSamples = outputBytes / 2
-        if (outputSamples <= 0) return 0
-        val step = sourceHz.toDouble() / targetHz.toDouble()
-        val sourceSamples = ceil(((outputSamples - 1) * step) + 1.0).toInt().coerceAtLeast(1)
-        return sourceSamples * 2
-    }
-
-    // Same as sourceBytesNeeded but for short[] paths where the caller works in samples.
-    fun sourceSamplesNeeded(outputSamples: Int, targetHz: Int, sourceHz: Int): Int {
-        if (outputSamples <= 0) return 0
-        val step = sourceHz.toDouble() / targetHz.toDouble()
-        return ceil(((outputSamples - 1) * step) + 1.0).toInt().coerceAtLeast(1)
-    }
-
     // Resamples raw PCM16 LE bytes from fromHz to toHz.
     // Converts bytes → shorts internally, resamples, converts back.
     fun resampleBytes(src: ByteArray, offset: Int, length: Int, fromHz: Int, toHz: Int): ByteArray {
         if (length < 2 || fromHz <= 0 || toHz <= 0) return ByteArray(0)
+        if (fromHz == toHz) return src.copyOfRange(offset, offset + length)
         val inSamples = bytesToShorts(src, offset, length / 2)
         val outCount = ((inSamples.size.toLong() * toHz) / fromHz).toInt().coerceAtLeast(1)
         return shortsToBytes(lerp(inSamples, outCount, fromHz.toDouble() / toHz.toDouble()))
-    }
-
-    // Resamples a PCM16 short[] from fromHz to toHz.
-    fun resampleShorts(src: ShortArray, offset: Int, count: Int, fromHz: Int, toHz: Int): ShortArray {
-        if (count <= 0 || fromHz <= 0 || toHz <= 0) return ShortArray(0)
-        val outCount = ((count.toLong() * toHz) / fromHz).toInt().coerceAtLeast(1)
-        return lerp(src.copyOfRange(offset, offset + count), outCount, fromHz.toDouble() / toHz.toDouble())
     }
 
     // Decodes PCM16 little-endian bytes into shorts.

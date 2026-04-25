@@ -1,56 +1,64 @@
 # XMicInject
 
-LSPosed module that intercepts `AudioRecord.read()` system-wide and replaces microphone audio with PCM received from a provider app over TCP.
+LSPosed module for one narrow test mode: when Telegram reads microphone audio, the module captures that PCM, writes it to a WAV file, and mutes the mic buffer returned to Telegram.
 
-Designed for a speech-to-speech translation pipeline: the user speaks, the real mic audio is forwarded to the provider, the provider returns translated audio, and that audio is injected back so VoIP apps (Telegram, Discord, etc.) hear the translation instead of the original voice.
+This is a temporary debug architecture. There is no provider app, no TCP socket, and no audio injection path. The goal is to validate the capture stage in isolation before rebuilding IPC.
 
-## Requirements
+## Current behavior
 
-- Android 10+ (minSdk 29)
-- Magisk with Zygisk enabled
-- LSPosed (JingMatrix fork recommended)
+- Hooks `AudioRecord.read()` only inside `org.telegram.messenger`
+- Watches mic-like sources: `MIC`, `VOICE_COMMUNICATION`, `VOICE_RECOGNITION`, `UNPROCESSED`
+- Chooses one active `AudioRecord` stream by RMS and source priority
+- Converts captured audio to `16 kHz`, `mono`, `PCM16`
+- Writes the result to a WAV file
+- Zeroes the mic buffer before Telegram receives it
 
-## How it works
+## Capture file location
 
+Files are written inside Telegram app storage:
+
+```text
+/data/user/0/org.telegram.messenger/files/xmicinject-captures/
 ```
-User speaks
-  → AudioRecord.read() fires in VoIP app
-    → XMicHook captures real mic audio → UplinkSender → IpcClient → [TCP] → the Provider
-    → XMicHook overwrites buf with translated audio ← PcmRingBuffer ← IpcClient ← [TCP] ← the Provider
-      → VoIP app hears the translation
-```
 
-The TCP connection is bidirectional over a single socket:
-- **Inject stream** (the Provider → module): translated PCM written into `PcmRingBuffer`
-- **Uplink stream** (module → the Provider): real mic audio forwarded so the Provider can send it to the S2S server
+Each session creates a file like:
+
+```text
+20260425_190312_481_uplink.wav
+```
 
 ## Installation
 
 1. Build the APK:
-   ```
+   ```bash
    ./gradlew assembleDebug
    ```
-2. Install on device:
-   ```
+2. Install it:
+   ```bash
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
-3. In **LSPosed Manager** → Modules → enable **XMicInject** → reboot
+3. Enable the module in LSPosed for Telegram.
+4. Reboot or perform a soft reboot from LSPosed.
 
 ## Usage
 
-Start the Provider app. Once it listens on `127.0.0.1:38673`, XMicInject connects automatically and injection begins. Any app using `AudioRecord` will receive translated audio; the real mic is muted while connected.
+1. Start a Telegram call.
+2. Speak into the microphone.
+3. End the call.
+4. Pull the WAV file from Telegram app storage and inspect it.
 
-## Protocol
+Useful log tags:
 
-See [SPEC.md](SPEC.md) for the full IPC protocol and audio format spec.
+- `XMicHook`
+- `XMicUplink`
+- `XMicCaptureFile`
 
 ## Project structure
 
-```
+```text
 app/src/main/java/com/xmicinject/
-├── XMicHook.kt        — entry point, registers AudioRecord.read() hooks
-├── PcmRingBuffer.kt   — thread-safe ring buffer (stores inject audio at 16 kHz)
-├── IpcClient.kt       — TCP connection to the Provider, feeds buffer, sends uplink
-├── UplinkSender.kt    — captures real mic, converts to mono, resamples, sends
-└── AudioResampler.kt  — PCM16 linear interpolation resampler (pure functions)
+├── XMicHook.kt          - registers AudioRecord hooks for Telegram
+├── UplinkSender.kt      - selects one active mic stream and normalizes PCM
+├── CaptureFileWriter.kt - writes 16 kHz mono PCM16 WAV files
+└── AudioResampler.kt    - PCM16 resampling helpers
 ```

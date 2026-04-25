@@ -8,7 +8,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Replaces microphone input with audio from a Unix socket stream" />
+            android:value="Captures Telegram microphone audio to a WAV file and mutes the app mic" />
         <meta-data
             android:name="xposedminversion"
             android:value="53" />

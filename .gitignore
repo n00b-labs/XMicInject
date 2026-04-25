@@ -13,7 +13,7 @@ local.properties
 .cxx/
 *.keystore
 !debug.keystore
-.android
+.android*
 
 # Generated
 gen/
@@ -24,3 +24,6 @@ captures/
 # OS
 .DS_Store
 Thumbs.db
+
+# mist
+output/
