@@ -10,7 +10,7 @@ import java.util.Locale
 internal object CaptureFileWriter {
 
     private const val TAG: String = "XMicCaptureFile"
-    private const val SAMPLE_RATE_HZ: Int = 16_000
+    private const val SAMPLE_RATE_HZ: Int = WIRE_SAMPLE_RATE_HZ
     private const val CHANNEL_COUNT: Int = 1
     private const val BITS_PER_SAMPLE: Int = 16
     private const val WAV_HEADER_BYTES: Int = 44

@@ -9,7 +9,7 @@ import kotlin.math.sqrt
 internal object UplinkSender {
 
     private const val TAG: String = "XMicUplink"
-    internal const val OUTPUT_SAMPLE_RATE_HZ: Int = 16_000
+    internal const val OUTPUT_SAMPLE_RATE_HZ: Int = WIRE_SAMPLE_RATE_HZ
 
     // Ignore near-silence chunks when selecting which AudioRecord stream to follow.
     private const val MIN_RMS: Float = 0.006f
@@ -70,6 +70,7 @@ internal object UplinkSender {
         if (payload.isEmpty()) return
 
         CaptureFileWriter.appendPcm16Mono(payload)
+        IpcClient.write(payload)
         if (!loggedFirstSend) {
             loggedFirstSend = true
             Log.i(

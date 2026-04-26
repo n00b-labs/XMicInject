@@ -11,7 +11,6 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 
 class XMicHook : IXposedHookLoadPackage {
 
@@ -41,13 +40,12 @@ class XMicHook : IXposedHookLoadPackage {
 
         Log.i(TAG, "Hook loaded: ${lpparam.packageName}")
         UplinkSender.configureCaptureOutput(lpparam.appInfo?.dataDir)
+        IpcClient.start()
 
-        val muteLogged = AtomicBoolean(false)
-
-        hookByteBuffer(lpparam.classLoader, lpparam.packageName, muteLogged)
+        hookByteBuffer(lpparam.classLoader, lpparam.packageName)
     }
 
-    private fun hookByteBuffer(cl: ClassLoader, pkg: String, muteLogged: AtomicBoolean) {
+    private fun hookByteBuffer(cl: ClassLoader, pkg: String) {
         val hook = object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 val count = param.result as? Int ?: return
@@ -94,16 +92,27 @@ class XMicHook : IXposedHookLoadPackage {
                     )
                 }
 
-                if (isMutedSource(source)) {
-                    val view = buffer.duplicate().apply { position(start); limit(start + count) }
-                    while (view.hasRemaining()) view.put(0)
-                    if (muteLogged.compareAndSet(false, true)) {
-                        Log.i(TAG, "Mic muted: pkg=$pkg source=${audioSourceName(source)} (ByteBuffer)")
-                    }
+                if (IpcClient.muteRealMic.get() && isUplinkSource(source)) {
+                    inject(buffer, start, count, hz)
                 }
             }
         }
         hookRead(cl, hook, ByteBuffer::class.java, Int::class.java, Int::class.java)
+    }
+
+    private fun inject(buffer: ByteBuffer, start: Int, count: Int, appSampleRateHz: Int) {
+        val sourceBytesNeeded = count * WIRE_SAMPLE_RATE_HZ / appSampleRateHz
+        val ringBytes = PcmRingBuffer.read(sourceBytesNeeded)
+        val injectBytes = if (ringBytes != null) {
+            AudioResampler.resampleBytes(ringBytes, 0, ringBytes.size, WIRE_SAMPLE_RATE_HZ, appSampleRateHz)
+        } else {
+            ByteArray(count)
+        }
+        val view = buffer.duplicate().apply { position(start); limit(start + count) }
+        view.put(injectBytes, 0, count.coerceAtMost(injectBytes.size))
+        if (injectBytes.size < count) {
+            while (view.hasRemaining()) view.put(0)
+        }
     }
 
     // --- AudioRecord accessors ---
@@ -139,10 +148,6 @@ class XMicHook : IXposedHookLoadPackage {
     // We only send uplink for mic-type sources. AudioRecord can also be used for
     // playback monitoring (REMOTE_SUBMIX) or internal routing — we don't want those.
     private fun isUplinkSource(audioSource: Int): Boolean {
-        return audioSource in UPLINK_SOURCES
-    }
-
-    private fun isMutedSource(audioSource: Int): Boolean {
         return audioSource in UPLINK_SOURCES
     }
 
