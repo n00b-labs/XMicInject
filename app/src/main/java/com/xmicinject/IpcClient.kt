@@ -24,8 +24,15 @@ internal object IpcClient {
         thread.start()
     }
 
+    @Volatile private var lastUplinkLogMs: Long = 0L
+
     fun write(data: ByteArray) {
         synchronized(lock) { uplinkStream }?.runCatching { write(data) }
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastUplinkLogMs >= 2_000L) {
+            lastUplinkLogMs = nowMs
+            Log.d(TAG, "[$nowMs] uplink write: ${data.size}B")
+        }
     }
 
     private fun runLoop() {
@@ -49,9 +56,14 @@ internal object IpcClient {
     private fun readInjectStream(socket: Socket) {
         val input = socket.getInputStream()
         val chunk = ByteArray(INJECT_CHUNK_BYTES)
+        var firstChunk = true
         while (true) {
             val n = input.read(chunk)
             if (n < 0) break
+            if (firstChunk) {
+                firstChunk = false
+                Log.i(TAG, "[${System.currentTimeMillis()}] first inject chunk received: ${n}B")
+            }
             PcmRingBuffer.write(chunk.copyOf(n))
         }
     }

@@ -25,10 +25,15 @@ class XMicHook : IXposedHookLoadPackage {
             MediaRecorder.AudioSource.UNPROCESSED
         )
         private const val READ_LOG_INTERVAL_MS: Long = 2_000L
+
+        private fun msInBuf(bytes: Int): Int = bytes * 1000 / (WIRE_SAMPLE_RATE_HZ * WIRE_BYTES_PER_SAMPLE)
     }
 
     private val seenReadPaths: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val lastReadLogMsByPath: MutableMap<String, Long> = ConcurrentHashMap()
+
+    @Volatile private var firstInjectDone = false
+    @Volatile private var lastInjectLogMs = 0L
 
     // Called by LSPosed once per loaded package. We skip ourselves, the Android framework,
     // and system UIDs to avoid hooking processes that don't do VoIP and can't be injected safely.
@@ -101,8 +106,21 @@ class XMicHook : IXposedHookLoadPackage {
     }
 
     private fun inject(buffer: ByteBuffer, start: Int, count: Int, appSampleRateHz: Int) {
+        val nowMs = System.currentTimeMillis()
         val sourceBytesNeeded = count * WIRE_SAMPLE_RATE_HZ / appSampleRateHz
+        val bufferedBefore = PcmRingBuffer.bufferedBytes
         val ringBytes = PcmRingBuffer.read(sourceBytesNeeded)
+        val injecting = ringBytes != null
+
+        if (injecting && !firstInjectDone) {
+            firstInjectDone = true
+            Log.i(TAG, "[$nowMs] FIRST INJECT: bufferedBefore=${bufferedBefore}B (${msInBuf(bufferedBefore)}ms) consumed=${sourceBytesNeeded}B appHz=$appSampleRateHz")
+        }
+        if (nowMs - lastInjectLogMs >= 2_000L) {
+            lastInjectLogMs = nowMs
+            Log.d(TAG, "[$nowMs] inject: bufferedBefore=${bufferedBefore}B (${msInBuf(bufferedBefore)}ms) injecting=$injecting need=${sourceBytesNeeded}B")
+        }
+
         val injectBytes = if (ringBytes != null) {
             AudioResampler.resampleBytes(ringBytes, 0, ringBytes.size, WIRE_SAMPLE_RATE_HZ, appSampleRateHz)
         } else {

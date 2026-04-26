@@ -13,8 +13,7 @@ if not exist "%XMIC_APK%" (
   exit /b 1
 )
 
-set "ADB_EXE=C:\Android\platform-tools\adb.exe"
-if not exist "%ADB_EXE%" set "ADB_EXE=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"
+set "ADB_EXE=adb.exe"
 if not exist "%ADB_EXE%" set "ADB_EXE="
 
 if not defined ADB_EXE (
@@ -27,7 +26,7 @@ if not defined ADB_EXE (
 :adb_found
 if not defined ADB_EXE (
   echo [ERROR] adb.exe not found.
-  echo [HINT] Install platform-tools or place adb at C:\Android\platform-tools\adb.exe
+  echo [HINT] Install platform-tools and ensure adb.exe is in PATH
   exit /b 1
 )
 

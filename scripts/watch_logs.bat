@@ -18,8 +18,8 @@ set "ANDROID_USER_HOME=%XMIC_DIR%\.android-adb"
 set "ANDROID_SDK_HOME=%XMIC_DIR%\.android-adb"
 if not exist "%ANDROID_USER_HOME%" mkdir "%ANDROID_USER_HOME%"
 
-set "ADB_EXE=C:\Android\platform-tools\adb.exe"
-if not exist "%ADB_EXE%" set "ADB_EXE=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"
+set "ADB_EXE=adb.exe"
+if not exist "%ADB_EXE%" set "ADB_EXE=adb.exe"
 if not exist "%ADB_EXE%" set "ADB_EXE="
 
 if not defined ADB_EXE (
@@ -32,7 +32,6 @@ if not defined ADB_EXE (
 :adb_found
 if not defined ADB_EXE (
   echo [ERROR] adb.exe not found.
-  echo [HINT] Put adb here: C:\Android\platform-tools\adb.exe
   exit /b 1
 )
 
@@ -81,17 +80,13 @@ if "%RAW_MODE%"=="1" (
   exit /b %errorlevel%
 )
 
-echo [MODE] Filtered (XMicInject / Telegram / LSPosed / crashes)
+echo [MODE] Filtered (XMicInject only)
 "%ADB_EXE%" logcat -v time | findstr /i ^
   /c:"XMicHook" ^
+  /c:"XMicRing" ^
+  /c:"XMicIpc" ^
   /c:"XMicUplink" ^
-  /c:"XMicCaptureFile" ^
-  /c:"LSPosed-Bridge" ^
-  /c:"AndroidRuntime" ^
-  /c:"FATAL EXCEPTION" ^
-  /c:"org.telegram.messenger" ^
-  /c:"AppOps" ^
-  /c:"attributionTag"
+  /c:"XMicCaptureFile"
 exit /b %errorlevel%
 
 :usage
